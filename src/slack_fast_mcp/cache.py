@@ -66,9 +66,36 @@ class Cache:
     def is_ready(self) -> bool:
         return self._users_ready and self._channels_ready
 
-    async def warm(self) -> None:
-        await self.refresh_users()
-        await self.refresh_channels()
+    async def warm(self) -> bool:
+        """Warm caches from disk (preferring fresh, falling back to stale).
+
+        Returns True if a background refresh is needed (stale data loaded).
+        """
+        needs_refresh = False
+
+        # Users
+        if self._try_load_users_from_disk():
+            self._users_ready = True
+            logger.info("Users cache loaded from disk")
+        elif self._try_load_users_from_disk(allow_stale=True):
+            self._users_ready = True
+            needs_refresh = True
+            logger.info("Users cache loaded from disk (stale, will refresh in background)")
+        else:
+            await self.refresh_users()
+
+        # Channels
+        if self._try_load_channels_from_disk():
+            self._channels_ready = True
+            logger.info("Channels cache loaded from disk")
+        elif self._try_load_channels_from_disk(allow_stale=True):
+            self._channels_ready = True
+            needs_refresh = True
+            logger.info("Channels cache loaded from disk (stale, will refresh in background)")
+        else:
+            await self.refresh_channels()
+
+        return needs_refresh
 
     async def refresh_users(self, *, force: bool = False) -> None:
         if not force and self._try_load_users_from_disk():
@@ -80,7 +107,7 @@ class Cache:
         all_users: list[dict] = []
         cursor = ""
         while True:
-            resp = await self._client.users_list(cursor=cursor, limit=200)
+            resp = await self._client.users_list(cursor=cursor, limit=1000)
             members = resp.get("members", [])
             all_users.extend(members)
             cursor = resp.get("response_metadata", {}).get("next_cursor", "")
@@ -113,7 +140,7 @@ class Cache:
         cursor = ""
         while True:
             resp = await self._client.conversations_list(
-                types=types_str, limit=200, cursor=cursor
+                types=types_str, limit=1000, cursor=cursor
             )
             channels = resp.get("channels", [])
             all_channels.extend(channels)
@@ -183,12 +210,12 @@ class Cache:
             return cid
         return None
 
-    def _try_load_users_from_disk(self) -> bool:
+    def _try_load_users_from_disk(self, *, allow_stale: bool = False) -> bool:
         if not self._users_cache_path:
             return False
         try:
             stat = os.stat(self._users_cache_path)
-            if self._ttl > 0 and (time.time() - stat.st_mtime) > self._ttl:
+            if not allow_stale and self._ttl > 0 and (time.time() - stat.st_mtime) > self._ttl:
                 return False
             with open(self._users_cache_path) as f:
                 data = json.load(f)
@@ -216,12 +243,12 @@ class Cache:
         except OSError:
             logger.warning("Failed to save users cache to disk")
 
-    def _try_load_channels_from_disk(self) -> bool:
+    def _try_load_channels_from_disk(self, *, allow_stale: bool = False) -> bool:
         if not self._channels_cache_path:
             return False
         try:
             stat = os.stat(self._channels_cache_path)
-            if self._ttl > 0 and (time.time() - stat.st_mtime) > self._ttl:
+            if not allow_stale and self._ttl > 0 and (time.time() - stat.st_mtime) > self._ttl:
                 return False
             with open(self._channels_cache_path) as f:
                 data = json.load(f)

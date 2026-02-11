@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -50,12 +51,30 @@ async def lifespan(server: FastMCP):
         channels_cache_path=config.channels_cache_path,
     )
     logger.info("Warming caches...")
-    await cache.warm()
+    needs_refresh = await cache.warm()
     logger.info("Caches ready")
+
+    # If stale disk cache was used, refresh in the background
+    bg_task = None
+    if needs_refresh:
+
+        async def _bg_refresh() -> None:
+            try:
+                logger.info("Starting background cache refresh...")
+                await cache.refresh_users(force=True)
+                await cache.refresh_channels(force=True)
+                logger.info("Background cache refresh complete")
+            except Exception:
+                logger.warning("Background cache refresh failed", exc_info=True)
+
+        bg_task = asyncio.create_task(_bg_refresh())
 
     # Store context for tools
     ctx = {"client": client, "cache": cache, "config": config, "workspace": workspace}
     yield ctx
+
+    if bg_task and not bg_task.done():
+        bg_task.cancel()
 
 
 mcp = FastMCP("Slack MCP Server", lifespan=lifespan)
